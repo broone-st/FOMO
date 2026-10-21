@@ -5,6 +5,8 @@
 
 > 名称含义：**FOMO = Fear of Missing Out**（"错失恐惧"）—— 侧身一瞥就能看清自选股，不用把行情软件开得满屏。
 
+# 一键下载：https://github.com/broone-st/FOMO/releases/download/v1.0.0/FOMO_V1.0.0.zip
+
 ## 快速启动
 
 > ⚠️ **这一版不含任何数据源**，必须先补 `provider.py` 才有数据 —— 见下一节。
