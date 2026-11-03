@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "kid": "c61d7e7f",
+  "seq": 4,
+  "issued": "2026-11-03T13:22:46Z",
+  "until": "2026-11-19T13:22:46Z",
+  "state": "alive",
+  "sig": "tD02fmqJU51bjtrrocXNR1hnhBef3PhwIiA1UeJK3Oax1ejl682rwX3SS7eOw5dQwQn5qOT/N3WbRIFjjfotCQ=="
+}
