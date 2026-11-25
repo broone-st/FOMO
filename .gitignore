@@ -1,0 +1,9 @@
+watch_config.json
+achievements.json
+muyu.json
+notes.rtf
+note_board.log
+fomo.log
+__pycache__/
+*.pyc
+*.zip
