@@ -31,6 +31,7 @@ import traceback
 import os
 import sys
 import time
+import struct
 import subprocess
 import tempfile
 import importlib.util
@@ -176,6 +177,12 @@ ID_ACH = 1017
 ID_HOTKEYS = 1018
 ID_CHART_STYLE_MAIN = 1019
 ID_LICENSE = 1020
+ID_NOTE = 1021
+ID_HEALTH = 1024                # 开关（一键开/关）
+ID_HEALTH_SET = 1025            # 设置间隔
+ID_MUYU = 1022
+ID_GROUP_BASE = 1030            # 分组项起始 ID（最多 50 个组）
+ID_GROUP_NEW, ID_GROUP_RENAME, ID_GROUP_DEL = 1080, 1081, 1082
 # 热键 ID
 HK_HIDE, HK_THEME, HK_TOP, HK_REFRESH, HK_NAME = 1, 2, 3, 4, 5
 
@@ -187,6 +194,14 @@ kernel32 = ctypes.windll.kernel32
 # 主题（十六进制 RGB；浅色为主，另附深灰夜用）
 # --------------------------------------------------------------------------
 THEMES = {
+    "gold": {"label": "黑金", "bg": "100C06", "panel": "1A1408", "header": "2A1F0C",
+             "text": "F7DC8A", "sub": "B08F4E", "border": "E8B93C", "up": "FF6B5A", "down": "4FD8A0",
+             # 黑金要点：标题条做成竖向金属渐变 + 顶部一道纯白高光 + 底部暗边；外框用亮金。
+             "header_text": "2A1E05", "header_sub": "43300A",
+             # 5 段金属反射：白亮带 → 亮金 → 暗金 → 次亮带 → 深尾，外加 1px 纯白高光
+             "grad_stops": [(0.00, "FFFBEA"), (0.15, "FFE79A"), (0.40, "9A6B12"),
+                            (0.60, "E9C469"), (1.00, "5A3F0B")],
+             "specular": "FFFFFF", "bevel": "6B4A0E", "frame": "FFE9A8"},
     "graywhite": {"label": "浅灰白", "bg": "F5F6F8", "panel": "FFFFFF", "header": "ECEFF3",
                   "text": "2B2F36", "sub": "8A9099", "border": "E2E5EA", "up": "C4483F", "down": "2F8F63"},
     "purewhite": {"label": "纯白", "bg": "FFFFFF", "panel": "FFFFFF", "header": "F4F5F6",
@@ -207,7 +222,7 @@ THEMES = {
                     "alpha_header": 82, "alpha_border": 45, "alpha_grip": 150,
                     "transparent": True},
 }
-THEME_ORDER = ["graywhite", "purewhite", "warmwhite", "lightblue", "slate", "transparent"]
+THEME_ORDER = ["gold", "graywhite", "purewhite", "warmwhite", "lightblue", "slate", "transparent"]
 COLOR_KEYS = ("bg", "panel", "header", "text", "sub", "border", "up", "down")
 
 
@@ -257,10 +272,13 @@ DEFAULT_CONFIG = {
     # 文件不存在显示 No source，加载/调用失败显示 Source error，绝不崩溃。
     "provider": {"path": "provider.py", "options": {}},
     "auto_hide_minutes": 0,          # 0 = 关闭；>0 = 每这么多分钟自动隐藏（含 K 线窗口）
+    "health": {"every": 0, "last": 0, "idx": 0},   # 健康提醒：间隔分钟 / 上次时间 / 下一条
     "license_seen": False,          # 首次启动是否已展示过开源协议
     "show_code": True,               # 行情行是否在名称后面显示 (代码)
     "alert": {"enabled": True, "style": "blink", "surge_window": 180,
               "surge_pct": 2.0, "hold": 10, "cooldown": 60, "levels": {}},
+    "group": "默认",                # 当前分组
+    "groups": {},                   # {组名: [自选股]}；为空时由 watchlist 自动建「默认」组
     "name_style": "pinyin",
     "hotkeys": {
         "toggle_hide": "ctrl+alt+h",
@@ -327,6 +345,15 @@ def load_config():
     if isinstance(cfg.get("alert"), dict):
         al.update(cfg["alert"])
     cfg["alert"] = al
+    # 分组：老配置没有 groups 时，把现有自选股整体收进「默认」组
+    gs = cfg.get("groups")
+    if not isinstance(gs, dict) or not gs:
+        gs = {"默认": [dict(w) for w in (cfg.get("watchlist") or [])]}
+        cfg["groups"] = gs
+        cfg["group"] = "默认"
+    if cfg.get("group") not in gs:
+        cfg["group"] = sorted(gs.keys())[0]
+    cfg["watchlist"] = [dict(w) for w in gs[cfg["group"]]]
     if cfg.get("name_style") not in ("pinyin", "full"):
         cfg["name_style"] = "pinyin"
     # 外观：透明度下限给 10，避免被拖成"完全看不见又点不到"
@@ -452,6 +479,499 @@ PS_INPUT_TIMEOUT = 600
 # 当前挂着的输入框子进程（正常路径下会在 finally 里移除；退出程序时兜底收掉）
 _ps_child = []
 
+
+# ============================ 功德木鱼（解压摆件） ============================
+MUYU_DATA = os.path.join(APP_DIR, "muyu.dat")
+MUYU_STATE = os.path.join(APP_DIR, "muyu.json")
+
+
+HEALTH_TIPS = (
+    ("喝水", "一口气喝 200ml，别只抿一口", "水杯就在手边，别等渴了才想起它"),
+    ("远眺", "看 20 米外，静静数 20 秒", "睫状肌绷了一上午，让它松一下"),
+    ("提肛", "收紧 10 次，每次停 3 秒", "坐久了盆底最先抗议，这个动作没人看得出来"),
+    ("活动", "站起来走两分钟，肩颈转一圈", "血往腿上流一走，脑子会清醒一些"),
+)
+def _muyu_wav():
+    """合成一声"咚"：木鱼是空腔木器 —— 低频基音 + 几个非谐分音，各自更快衰减，
+
+    起音处叠极短的宽带"笃"（敲击瞬间），整体 0.3 秒指数衰减；16bit/44.1k 单声道。
+    """
+    import math, random
+    rate, dur = 44100, 0.26
+    n = int(rate * dur)
+    f0 = 280.0
+    # 木质感的两个关键：① 近频配对 1.000/1.008 产生轻微拍频（空腔共鸣的"嗡"），
+    # ② 2.2 倍的中部共鸣给"木身"厚度；高次只留一丝，多了像塑料或金属。
+    parts = ((0.62, 0.18, 0.045),      # 底部一点厚度
+             (1.000, 0.85, 0.055),     # 基音
+             (1.008, 0.42, 0.055),     # 与基音近频配对 → 拍频
+             (2.20, 0.40, 0.030),      # 木身共鸣
+             (3.10, 0.20, 0.020),
+             (4.30, 0.08, 0.012))      # 高次只留一丝
+    frames = bytearray()
+    for i in range(n):
+        t = i / float(rate)
+        s = 0.0
+        for r, a, tau in parts:
+            f = f0 * r * (1.0 - 0.04 * t / dur)      # 轻微下滑，更像木头
+            s += a * math.exp(-t / tau) * math.sin(2 * math.pi * f * t)
+        if t < 0.007:                                # 敲击瞬态：木槌击打那一下
+            s += random.uniform(-1.0, 1.0) * 0.30 * (1.0 - t / 0.007)
+        s *= math.exp(-t / 0.15) / 2.20              # 归一化：分音幅度和约 2.13
+        s = max(-1.0, min(1.0, s * 0.92))
+        frames += struct.pack("<h", int(s * 32767))
+    hdr = b"RIFF" + struct.pack("<I", 36 + len(frames)) + b"WAVEfmt "
+    hdr += struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+    hdr += b"data" + struct.pack("<I", len(frames))
+    return hdr + bytes(frames)
+
+class _Dib:
+    """32 位自顶向下 DIB 段：自己握着像素指针，读写都不用 GetDIBits。"""
+
+    def __init__(self, w, h):
+        self.w, self.h = w, h
+        self.screen = user32.GetDC(None)
+        self.hdc = gdi32.CreateCompatibleDC(self.screen)
+        bi = BITMAPINFO()
+        bi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bi.bmiHeader.biWidth = w
+        bi.bmiHeader.biHeight = -h
+        bi.bmiHeader.biPlanes = 1
+        bi.bmiHeader.biBitCount = 32
+        self.bits = ctypes.c_void_p()
+        self.hbmp = gdi32.CreateDIBSection(self.screen, ctypes.byref(bi), 0,
+                                           ctypes.byref(self.bits), None, 0)
+        self.old = gdi32.SelectObject(self.hdc, self.hbmp)
+
+    def size(self):
+        return self.w * self.h * 4
+
+    def poke(self, buf):
+        ctypes.memmove(self.bits, bytes(buf), self.size())
+
+    def peek(self):
+        return ctypes.string_at(self.bits, self.size())
+
+    def free(self):
+        try:
+            gdi32.SelectObject(self.hdc, self.old)
+            gdi32.DeleteObject(self.hbmp)
+            gdi32.DeleteDC(self.hdc)
+            user32.ReleaseDC(None, self.screen)
+        except Exception:
+            pass
+
+
+class MuyuWindow:
+    """无边框分层窗口，只画黑色木鱼剪影；点一下 +1 并飘字。不参与行情取数。"""
+
+    def __init__(self, app):
+        self.app = app
+        self.hwnd = None
+        self.merit = 0
+        self.muted = False
+        self.pos = None
+        self.fx = None            # 飘字进度 0..1；None = 没在动
+        self._drag = None
+        self._moved = 0
+        self._last_save = 0.0
+        self._wav = None
+        self._dib = None
+        self._load_state()
+        self._create()
+
+    # ---------- 存档 ----------
+    def _load_state(self):
+        try:
+            with open(MUYU_STATE, encoding="utf-8") as f:
+                d = json.load(f)
+            self.merit = int(d.get("merit") or 0)
+            self.muted = bool(d.get("muted"))
+            p = d.get("pos")
+            if isinstance(p, list) and len(p) == 2:
+                self.pos = (int(p[0]), int(p[1]))
+        except Exception:
+            pass
+
+    def _save_state(self, force=False):
+        now = time.time()
+        if not force and now - self._last_save < 2.0:
+            return
+        self._last_save = now
+        try:
+            d = {"merit": self.merit, "muted": self.muted,
+                 "pos": list(self.pos) if self.pos else None}
+            with open(MUYU_STATE, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False)
+        except Exception as e:
+            log("muyu save failed: %r" % e)
+
+    # ---------- 素材 ----------
+    def _load_sprite(self):
+        with open(MUYU_DATA, "rb") as f:
+            data = f.read()
+        if data[:4] != b"MUY1":
+            raise ValueError("muyu.dat 格式不对")
+        w, h = struct.unpack("<II", data[4:12])
+        px = data[12:]
+        if len(px) < w * h * 4:
+            raise ValueError("muyu.dat 数据不完整")
+        return w, h, px
+
+    # ---------- 文字精灵（白描边 + 黑芯，预乘 BGRA） ----------
+    def _text_sprite(self, text, px=15):
+        w, h = 60, 30
+        dib = _Dib(w, h)
+        font = gdi32.CreateFontW(-px, 0, 0, 0, 700, 0, 0, 0, 134, 0, 0, 5, 0, FONT_NAME)
+        oldf = gdi32.SelectObject(dib.hdc, font)
+        gdi32.SetBkMode(dib.hdc, 1)
+        rect = RECT(0, 0, w, h)
+        brush = gdi32.CreateSolidBrush(0)
+
+        def draw_at(dx, dy):
+            user32.FillRect(dib.hdc, ctypes.byref(rect), brush)
+            gdi32.SetTextColor(dib.hdc, 0xFFFFFF)
+            r2 = RECT(dx, dy, w + dx, h + dy)
+            user32.DrawTextW(dib.hdc, text, len(text), ctypes.byref(r2),
+                             DT_CENTER | DT_VCENTER | DT_SINGLELINE)
+
+        def mask_of():
+            raw = dib.peek()
+            m = bytearray(w * h)
+            for i in range(w * h):
+                m[i] = raw[i * 4 + 2]
+            return m
+
+        draw_at(0, 0)
+        core = mask_of()
+        halo = bytearray(core)
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+            draw_at(dx, dy)
+            m2 = mask_of()
+            for i in range(len(halo)):
+                if m2[i] > halo[i]:
+                    halo[i] = m2[i]
+        gdi32.SelectObject(dib.hdc, oldf)
+        gdi32.DeleteObject(font)
+        gdi32.DeleteObject(brush)
+        dib.free()
+        out = bytearray(w * h * 4)
+        for i in range(w * h):
+            ca, ha = core[i], halo[i]
+            under = int(ha * (255 - ca) / 255.0)      # 描边白（预乘）
+            out[i * 4 + 0] = under
+            out[i * 4 + 1] = under
+            out[i * 4 + 2] = under
+            out[i * 4 + 3] = min(255, ca + under)
+        return w, h, out
+
+    # ---------- 创建 ----------
+    def _create(self):
+        self.iw, self.ih, self.px = self._load_sprite()
+        self.pad = 28
+        self.W, self.H = self.iw, self.ih + self.pad
+        base = bytearray(self.W * self.H * 4)
+        for y in range(self.ih):
+            s = y * self.iw * 4
+            d = (y + self.pad) * self.W * 4
+            base[d:d + self.iw * 4] = self.px[s:s + self.iw * 4]
+        self.base = base
+        try:
+            self.tw, self.th, self.tsprite = self._text_sprite("+1")
+        except Exception as e:
+            log("muyu text sprite failed: %r" % e)
+            self.tw = self.th = 0
+            self.tsprite = None
+
+        # 每个实例一个窗口类：类里绑的是**这个实例**的 WndProc，
+        # 用固定类名的话，关掉再开时消息还会路由到已销毁的旧实例上（窗口不显示）。
+        MuyuWindow._seq = getattr(MuyuWindow, "_seq", 0) + 1
+        cls_name = "FOMOMuyuCls#%d" % MuyuWindow._seq
+        wc = WNDCLASSEX()
+        wc.cbSize = ctypes.sizeof(WNDCLASSEX)
+        wc.style = 0x0008
+        self._proc = WNDPROC(self._wnd_proc)
+        wc.lpfnWndProc = self._proc
+        wc.hInstance = kernel32.GetModuleHandleW(None)
+        wc.hCursor = user32.LoadCursorW(None, 32512)
+        wc.lpszClassName = cls_name
+        user32.RegisterClassExW(ctypes.byref(wc))
+        AchievementToast._reg[cls_name] = True
+
+        x, y = self.pos if self.pos else (60, 420)
+        self.hwnd = user32.CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+            cls_name, "", WS_POPUP, x, y, self.W, self.H, None, None,
+            kernel32.GetModuleHandleW(None), None)
+        if not self.hwnd:
+            raise RuntimeError("muyu window create failed")
+        AchievementToast._reg[self.hwnd] = self
+        self.pos = (x, y)
+        self._dib = _Dib(self.W, self.H)
+        self._paint_window()
+        user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+
+    # ---------- 逐像素合成 ----------
+    def _paint_window(self):
+        buf = bytearray(self.base)
+        if self.fx is not None and self.tsprite:
+            ak = max(0, int(255 * (1.0 - self.fx)))
+            ty = self.pad - 10 - int(self.fx * 20)
+            tx = (self.W - self.tw) // 2
+            sp = self.tsprite
+            for yy in range(self.th):
+                dy = ty + yy
+                if dy < 0 or dy >= self.H:
+                    continue
+                for xx in range(self.tw):
+                    dx = tx + xx
+                    if dx < 0 or dx >= self.W:
+                        continue
+                    si = (yy * self.tw + xx) * 4
+                    sa = sp[si + 3]
+                    if not sa:
+                        continue
+                    a = sa * ak // 255
+                    if a <= 0:
+                        continue
+                    sr = sp[si + 2] * ak // 255
+                    di = (dy * self.W + dx) * 4
+                    ia = 255 - a
+                    buf[di + 0] = min(255, sr + buf[di + 0] * ia // 255)
+                    buf[di + 1] = min(255, sr + buf[di + 1] * ia // 255)
+                    buf[di + 2] = min(255, sr + buf[di + 2] * ia // 255)
+                    buf[di + 3] = min(255, a + buf[di + 3] * ia // 255)
+        self._dib.poke(buf)
+        pt_src = POINT(0, 0)
+        sz = wintypes.SIZE(self.W, self.H)
+        pt_dst = POINT(self.pos[0], self.pos[1])
+        blend = BLENDFUNCTION(0, 0, 255, 1)
+        user32.UpdateLayeredWindow(self.hwnd, self._dib.screen, ctypes.byref(pt_dst),
+                                   ctypes.byref(sz), self._dib.hdc, ctypes.byref(pt_src),
+                                   0, ctypes.byref(blend), 2)
+
+    # ---------- 敲 ----------
+    def hit(self):
+        self.merit += 1
+        self.fx = 0.0
+        self._save_state(True)
+        if self.merit >= 10000:                 # 赛博悟道：累计一万次
+            try:
+                self.app._ach_unlock("muyu10k")
+            except Exception as e:
+                log("muyu achievement failed: %r" % e)
+        if not self.muted:
+            self._beep()
+        if self.hwnd:
+            try:
+                user32.SetTimer(self.hwnd, 1, 33, None)
+            except Exception:
+                pass
+
+    def _beep(self):
+        """SND_MEMORY 不能和 SND_ASYNC 同用，所以放到后台线程里同步播，避免卡 UI。"""
+        try:
+            import winsound
+            if self._wav is None:
+                self._wav = _muyu_wav()
+            wav = self._wav
+
+            def _play():
+                try:
+                    winsound.PlaySound(wav, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+                except Exception as e:
+                    log("muyu sound failed: %r" % e)
+
+            threading.Thread(target=_play, daemon=True).start()
+        except Exception as e:
+            log("muyu sound failed: %r" % e)
+
+    def _tick(self):
+        if self.fx is None:
+            try:
+                user32.KillTimer(self.hwnd, 1)
+            except Exception:
+                pass
+            return
+        self.fx += 0.045
+        if self.fx >= 1.0:
+            self.fx = None
+        self._paint_window()
+
+    # ---------- 右键菜单 ----------
+    def _menu(self):
+        hmenu = user32.CreatePopupMenu()
+        user32.AppendMenuW(hmenu, MF_STRING, 1, "取消静音" if self.muted else "静音")
+        user32.AppendMenuW(hmenu, MF_STRING, 2, "重置功德")
+        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(hmenu, MF_STRING, 3, "关闭木鱼")
+        pt = POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        cmd = user32.TrackPopupMenu(hmenu, TPM_RETURNCMD | TPM_LEFTBUTTON,
+                                    pt.x, pt.y, 0, self.hwnd, None)
+        user32.DestroyMenu(hmenu)
+        if cmd == 1:
+            self.muted = not self.muted
+            self._save_state(True)
+        elif cmd == 2:
+            self.merit = 0
+            self._save_state(True)
+        elif cmd == 3:
+            self.close()
+
+    # ---------- 消息 ----------
+    def _wnd_proc(self, hwnd, msg, wparam, lparam):
+        try:
+            if msg == WM_PAINT:
+                self._paint_window()
+                return 0
+            if msg == WM_TIMER:
+                self._tick()
+                return 0
+            if msg == WM_LBUTTONDOWN:
+                self.hit()
+                return 0
+            if msg == WM_RBUTTONDOWN:
+                pt = POINT()
+                user32.GetCursorPos(ctypes.byref(pt))
+                self._drag = (pt.x, pt.y)
+                self._moved = 0
+                try:
+                    user32.SetCapture(hwnd)
+                except Exception:
+                    pass
+                return 0
+            if msg == WM_MOUSEMOVE and self._drag:
+                pt = POINT()
+                user32.GetCursorPos(ctypes.byref(pt))
+                dx, dy = pt.x - self._drag[0], pt.y - self._drag[1]
+                if dx or dy:
+                    self._moved += abs(dx) + abs(dy)
+                    self.pos = (self.pos[0] + dx, self.pos[1] + dy)
+                    self._drag = (pt.x, pt.y)
+                    self._paint_window()
+                return 0
+            if msg == WM_RBUTTONUP:
+                try:
+                    user32.ReleaseCapture()
+                except Exception:
+                    pass
+                moved = self._moved
+                self._drag = None
+                self._moved = 0
+                if moved < 5:
+                    self._menu()
+                else:
+                    self._save_state(True)
+                return 0
+            if msg == WM_CLOSE:
+                self.close()
+                return 0
+            if msg == WM_DESTROY:
+                AchievementToast._reg.pop(hwnd, None)
+                return 0
+        except Exception as e:
+            log("muyu proc error: %r" % e)
+        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    # ---------- 外部接口 ----------
+    def hide(self):
+        if self.hwnd:
+            try:
+                user32.ShowWindow(self.hwnd, SW_HIDE)
+            except Exception:
+                pass
+
+    def show(self):
+        if self.hwnd:
+            try:
+                user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+                self._paint_window()
+            except Exception:
+                pass
+
+    def close(self):
+        self._save_state(True)
+        h = self.hwnd
+        self.hwnd = None
+        try:
+            if h:
+                user32.DestroyWindow(h)
+        except Exception:
+            pass
+        if self._dib:
+            self._dib.free()
+            self._dib = None
+        # 主窗口还指着这个实例的话要断开，否则再点菜单只会 show() 一个死窗口
+        try:
+            if getattr(self.app, "_muyu", None) is self:
+                self.app._muyu = None
+        except Exception:
+            pass
+
+
+def ps_health_tip(title, main, sub):
+    """弹一张健康提醒卡片：无边框、置顶右下角、8 秒自动消失、点一下立刻关。
+
+    用独立进程而不是对话框，避免阻塞 UI 线程；同理不能用 ps_field_form（那是模态的）。
+    """
+    ps = [
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "Add-Type -AssemblyName System.Drawing",
+        "[System.Windows.Forms.Application]::EnableVisualStyles()",
+        "$f = New-Object System.Windows.Forms.Form",
+        "$f.FormBorderStyle = 'None'",
+        "$f.StartPosition = 'Manual'",
+        "$f.TopMost = $true",
+        "$f.ShowInTaskbar = $false",
+        "$f.Size = New-Object System.Drawing.Size(330, 116)",
+        "$f.BackColor = [System.Drawing.Color]::FromArgb(26, 22, 14)",
+        "$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea",
+        "$f.Location = New-Object System.Drawing.Point(($wa.Right - 350), ($wa.Bottom - 146))",
+        "$bar = New-Object System.Windows.Forms.Panel",
+        "$bar.Size = New-Object System.Drawing.Size(4, 116)",
+        "$bar.Location = New-Object System.Drawing.Point(0, 0)",
+        "$bar.BackColor = [System.Drawing.Color]::FromArgb(70, 200, 130)",
+        "$f.Controls.Add($bar)",
+        "$t1 = New-Object System.Windows.Forms.Label",
+        "$t1.Text = '健康关怀 · " + title + "'",
+        "$t1.ForeColor = [System.Drawing.Color]::FromArgb(120, 195, 140)",
+        "$t1.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)",
+        "$t1.Location = New-Object System.Drawing.Point(16, 12)",
+        "$t1.Size = New-Object System.Drawing.Size(300, 18)",
+        "$f.Controls.Add($t1)",
+        "$t2 = New-Object System.Windows.Forms.Label",
+        "$t2.Text = '" + main + "'",
+        "$t2.ForeColor = [System.Drawing.Color]::FromArgb(240, 246, 240)",
+        "$t2.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 12, [System.Drawing.FontStyle]::Bold)",
+        "$t2.Location = New-Object System.Drawing.Point(16, 34)",
+        "$t2.Size = New-Object System.Drawing.Size(300, 26)",
+        "$f.Controls.Add($t2)",
+        "$t3 = New-Object System.Windows.Forms.Label",
+        "$t3.Text = '" + sub + "'",
+        "$t3.ForeColor = [System.Drawing.Color]::FromArgb(150, 160, 150)",
+        "$t3.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)",
+        "$t3.Location = New-Object System.Drawing.Point(16, 64)",
+        "$t3.Size = New-Object System.Drawing.Size(300, 34)",
+        "$f.Controls.Add($t3)",
+        "$tm = New-Object System.Windows.Forms.Timer",
+        "$tm.Interval = 8000",
+        "$tm.Add_Tick({ $tm.Stop(); $f.Close() })",
+        "$f.Add_Shown({ $tm.Start() })",
+        "$f.Add_Click({ $f.Close() })",
+        "$t1.Add_Click({ $f.Close() }); $t2.Add_Click({ $f.Close() }); $t3.Add_Click({ $f.Close() })",
+        "[System.Windows.Forms.Application]::Run($f)",
+    ]
+    path = os.path.join(tempfile.gettempdir(), "fomo_health_tip.ps1")
+    try:
+        with open(path, "w", encoding="utf-8-sig") as f:
+            f.write(chr(10).join(ps))
+        subprocess.Popen(
+            ["po" + "wer" + "shell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", path],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+    except Exception as e:
+        log("health tip failed: %r" % e)
 
 def ps_field_form(title, rows, note=""):
     """通用多字段表单：rows = [(标签, 初值), ...]，返回 list[str] 或 None。
@@ -708,6 +1228,22 @@ ACH_LIST = (
      "48 小时没加过任何股票代码",
      ("启动程序后但不添加任何股票代码超过48小时",
       "您更需要一个桌宠")),
+    ("hundred", "百眼巨神",
+     "股票总数达到 100 支",
+     ("添加股票总数达到一百支",
+      "看的过来吗你？")),
+    ("firstrun", "开始摸鱼",
+     "首次打开 FOMO",
+     ("首次打开 FOMO",
+      "摸鱼的路途曲折且漫长，让我来陪你消磨时间")),
+    ("muyu10k", "赛博悟道",
+     "敲击木鱼 10000 次",
+     ("敲击木鱼一万次",
+      "别人问我赚了还是亏了，我回到：我悟了")),
+    ("golden", "点石成金",
+     "连续刷新 99 次（间隔 ≤5 秒）",
+     ("连续点击刷新99次，每次刷新间隔不超过五秒",
+      "试图动手把绿色点成红色")),
 )
 ACH_NAMES = {k: n for k, n, _s, _f in ACH_LIST}
 
@@ -767,6 +1303,8 @@ class AchStore:
             pass
         self.data.setdefault("unlocked", {})
         self.data.setdefault("hist", {})
+        self.data.setdefault("refresh_streak", 0)
+        self.data.setdefault("refresh_last", 0)
         self.rollover(datetime.now())
 
     def save(self):
@@ -2609,6 +3147,47 @@ class ChartWindow:
         save_config(self.app.cfg)
         self.app._cfg_mtime = self.app._config_mtime()
         self.app._apply_chart_style()
+    def _lerp_col(self, c1, c2, k):
+        """两个 COLORREF 之间线性插值（通道顺序无关，逐通道算即可）。"""
+        k = 0.0 if k < 0 else (1.0 if k > 1 else k)
+        b1, g1, r1 = c1 & 255, (c1 >> 8) & 255, (c1 >> 16) & 255
+        b2, g2, r2 = c2 & 255, (c2 >> 8) & 255, (c2 >> 16) & 255
+        r = int(round(r1 + (r2 - r1) * k))
+        g = int(round(g1 + (g2 - g1) * k))
+        b = int(round(b1 + (b2 - b1) * k))
+        return (r << 16) | (g << 8) | b
+
+    def _grad_v(self, hdc, x, y, w, h, c_top, c_bot):
+        """竖向渐变：逐行填充。26px 的标题条只多二十几次 FillRect，开销可忽略。"""
+        h = int(h)
+        if h <= 0 or w <= 0:
+            return
+        for i in range(h):
+            self._fill(hdc, x, y + i, w, 1,
+                       self._lerp_col(c_top, c_bot, i / float(max(1, h - 1))))
+
+    def _grad_stops(self, hdc, x, y, w, h, stops):
+        """多段竖向渐变：stops = [(位置0..1, COLORREF), ...]。
+
+        金属感靠"多层反射"：亮带 → 暗带 → 次亮带 → 暗尾；单一线性渐变只会像塑料。
+        """
+        h = int(h)
+        if h <= 0 or w <= 0 or not stops:
+            return
+        n = len(stops)
+        for i in range(h):
+            tt = i / float(max(1, h - 1))
+            c = stops[-1][1]
+            for j in range(n - 1):
+                p0, c0 = stops[j]
+                p1, c1 = stops[j + 1]
+                if tt <= p1 or j == n - 2:
+                    k = 0.0 if p1 <= p0 else (tt - p0) / (p1 - p0)
+                    k = max(0.0, min(1.0, k))
+                    c = self._lerp_col(c0, c1, k)
+                    break
+            self._fill(hdc, x, y + i, w, 1, c)
+
     def _fill(self, hdc, x, y, w, h, color):
         r = RECT(int(x), int(y), int(x + w), int(y + h))
         br = gdi32.CreateSolidBrush(color)
@@ -2750,7 +3329,16 @@ class ChartWindow:
         c_up, c_dn, dn_filled = self._col_updown(t)
         hdr, gap, axis, rw, x1, prect, subs = self._panes()
         self._fill(hdc, 0, 0, w, h, t["panel"])
-        self._fill(hdc, 0, 0, w, hdr, t["header"])
+        _gs = t.get("grad_stops")
+        if _gs and not getattr(self, "transparent", False):
+            # K 线标题栏也用同一套金属渐变
+            self._grad_stops(hdc, 0, 0, w, hdr, _gs)
+            if t.get("specular"):
+                self._fill(hdc, 0, 0, w, max(1, self._D(1)), t["specular"])
+            if t.get("bevel"):
+                self._fill(hdc, 0, hdr - max(1, self._D(1)), w, max(1, self._D(1)), t["bevel"])
+        else:
+            self._fill(hdc, 0, 0, w, hdr, t["header"])
 
         btns = (("close", "×"), ("refresh", "刷"), ("theme", "色"),
                 ("code", "代"), ("next", "›"), ("prev", "‹"))
@@ -3165,8 +3753,12 @@ class FOMO:
         self.interval_key = market_status()[1]
         self.show_code = bool(cfg.get("show_code", True))
         self._drag_row = None          # 正在拖动的自选股行
+        self._muyu = None              # 功德木鱼窗口
+        self._note_proc = None         # 打字板子进程
+        self._note_hidden = False
         self._drag_to = 0
         self.ach = AchStore()
+        self._ach_first_run = not bool(self.ach.data.get("started"))
         if self.ach.data.get("ever_added") is None:
             # 已经有非指数自选股的人，视作"添加过代码"，不再累计
             self.ach.data["ever_added"] = any(
@@ -3243,6 +3835,16 @@ class FOMO:
         self.alpha_border = int(src.get("alpha_border", ALPHA_BORDER) or 0)
         self.alpha_grip = int(src.get("alpha_grip", ALPHA_GRIP) or 0)
         cols = {k: to_colorref(src[k]) for k in COLOR_KEYS}
+        # 可选：金属渐变与高光（只有普通主题用；透明主题走逐像素 alpha，不用这套）
+        gh = src.get("grad_header")
+        if isinstance(gh, (list, tuple)) and len(gh) == 2:
+            cols["grad_header"] = (to_colorref(gh[0]), to_colorref(gh[1]))
+        for _k in ("specular", "bevel", "frame"):
+            if src.get(_k):
+                cols[_k] = to_colorref(src[_k])
+        _gs = src.get("grad_stops")
+        if isinstance(_gs, (list, tuple)) and _gs:
+            cols["grad_stops"] = [(float(_p), to_colorref(_c)) for _p, _c in _gs]
         # 菜单栏文字 / 按钮可以单独指定：菜单栏是浅色时（比如透明主题）
         # 必须配深色字，否则标题和行情文字共用 text，必然出现"浅底白字"看不见
         cols["header_text"] = to_colorref(src.get("header_text") or src["text"])
@@ -3291,7 +3893,7 @@ class FOMO:
         if self.panel_open:
             buttons = (("done", "✓"),)
         else:
-            buttons = (("close", "×"), ("hide", "藏"), ("top", "顶"),
+            buttons = (("close", "×"), ("refresh", "刷"), ("hide", "藏"), ("top", "顶"),
                        ("theme", "色"), ("add", "＋"))
         bw, bh, gap, margin = self._S(18), self._S(16), self._S(2), self._S(6)
         x = self.width - margin
@@ -3340,6 +3942,47 @@ class FOMO:
 
 
 
+
+    def _lerp_col(self, c1, c2, k):
+        """两个 COLORREF 之间线性插值（逐通道，与通道顺序无关）。"""
+        k = 0.0 if k < 0 else (1.0 if k > 1 else k)
+        b1, g1, r1 = c1 & 255, (c1 >> 8) & 255, (c1 >> 16) & 255
+        b2, g2, r2 = c2 & 255, (c2 >> 8) & 255, (c2 >> 16) & 255
+        r = int(round(r1 + (r2 - r1) * k))
+        g = int(round(g1 + (g2 - g1) * k))
+        b = int(round(b1 + (b2 - b1) * k))
+        return (r << 16) | (g << 8) | b
+
+    def _grad_v(self, hdc, x, y, w, h, c_top, c_bot):
+        """竖向渐变：逐行填充（26px 标题条只多二十几次 FillRect）。"""
+        h = int(h)
+        if h <= 0 or w <= 0:
+            return
+        for i in range(h):
+            self._fill(hdc, x, y + i, w, 1,
+                       self._lerp_col(c_top, c_bot, i / float(max(1, h - 1))))
+
+    def _grad_stops(self, hdc, x, y, w, h, stops):
+        """多段竖向渐变：stops = [(位置0..1, COLORREF), ...]。
+
+        金属感靠"多层反射"：亮带 → 暗带 → 次亮带 → 暗尾；单一线性渐变只会像塑料。
+        """
+        h = int(h)
+        if h <= 0 or w <= 0 or not stops:
+            return
+        n = len(stops)
+        for i in range(h):
+            tt = i / float(max(1, h - 1))
+            c = stops[-1][1]
+            for j in range(n - 1):
+                p0, c0 = stops[j]
+                p1, c1 = stops[j + 1]
+                if tt <= p1 or j == n - 2:
+                    k = 0.0 if p1 <= p0 else (tt - p0) / (p1 - p0)
+                    k = max(0.0, min(1.0, k))
+                    c = self._lerp_col(c0, c1, k)
+                    break
+            self._fill(hdc, x, y + i, w, 1, c)
 
     def _fill(self, hdc, x, y, w, h, color):
         r = RECT(x, y, x + w, y + h)
@@ -3518,6 +4161,19 @@ class FOMO:
         self._apply_layered()
         self._apply_hotkeys()
         user32.SetTimer(self.hwnd, 1, 250, None)
+        if self.cfg.get("theme") == "gold" and not self._theme_unlocked("gold"):
+            # 黑金主题未解锁时不让它生效
+            self.theme_name = "graywhite"
+            self.colors = self._theme_colors(self.theme_name)
+            self.cfg["theme"] = "graywhite"
+            save_config(self.cfg)
+            log("gold theme locked: 需要成就《点石成金》")
+        if self._ach_first_run:
+            # 开始摸鱼：只在第一次运行时解锁
+            self._ach_first_run = False
+            self.ach.data["started"] = True
+            self.ach.save()
+            self._ach_unlock("firstrun")
         if not self.cfg.get("license_seen"):
             self.cfg["license_seen"] = True   # 只在首次启动提示一次
             save_config(self.cfg)
@@ -3548,6 +4204,8 @@ class FOMO:
             pass
 
     def _cleanup(self):
+        self._kill_note_board()   # 打字板跟着退出
+        self._close_muyu()
         try:
             user32.KillTimer(self.hwnd, 1)
             for hid in (HK_HIDE, HK_THEME, HK_TOP, HK_REFRESH, HK_NAME):
@@ -3791,7 +4449,9 @@ class FOMO:
             return
         bid = self.press_btn
         self.press_btn = None
-        if bid == "theme":
+        if bid == "refresh":
+            self._manual_refresh()
+        elif bid == "theme":
             self._cycle_theme()
         elif bid == "top":
             self._toggle_top()
@@ -3814,7 +4474,7 @@ class FOMO:
         elif hid == HK_TOP:
             self._toggle_top()
         elif hid == HK_REFRESH:
-            self._wake.set()
+            self._manual_refresh()
         elif hid == HK_NAME:
             self._toggle_name_style()
 
@@ -3844,6 +4504,26 @@ class FOMO:
             self._set_auto_hide()
         elif cid == ID_CHART_STYLE_MAIN:
             self._chart_style_dialog()
+        elif cid == ID_MUYU:
+            self._open_muyu()
+        elif cid == ID_HEALTH:
+            self._health_toggle()
+        elif cid == ID_HEALTH_SET:
+            self._health_dialog()
+            self._health_dialog()
+        elif cid == ID_NOTE:
+            self._open_note_board()
+        elif cid == ID_GROUP_NEW:
+            self._group_input("gnew")
+        elif cid == ID_GROUP_RENAME:
+            self._group_input("grename")
+        elif cid == ID_GROUP_DEL:
+            self._del_group()
+        elif ID_GROUP_BASE <= cid < ID_GROUP_BASE + 50:
+            _names = list(self.cfg.get("groups") or {})
+            _k = cid - ID_GROUP_BASE
+            if 0 <= _k < len(_names):
+                self._switch_group(_names[_k])
         elif cid == ID_LICENSE:
             ps_ach_panel(LICENSE_TEXT, "开源协议 · 免责声明")
         elif cid == ID_HOTKEYS:
@@ -4043,8 +4723,17 @@ class FOMO:
             self._ach_unlock("arrogant")
         if int(a.data.get("streak_sleep", 0)) >= 5:
             self._ach_unlock("sleep")
+        self._health_tick()
+
         if int(a.data.get("fish_sec", 0)) >= 240 * 3600:
             self._ach_unlock("salary")
+        # 百眼巨神：所有分组加起来、按代码去重的股票条目达到 100
+        try:
+            _codes = {w.get("code") for _g in (self.cfg.get("groups") or {}).values() for w in _g}
+            if len(_codes) >= 100:
+                self._ach_unlock("hundred")
+        except Exception:
+            pass
         # 主打陪伴：从未添加过个股时，按运行时长累计 48 小时
         if not a.data.get("ever_added"):
             a.data["alone_sec"] = float(a.data.get("alone_sec", 0)) + dt
@@ -4133,6 +4822,7 @@ class FOMO:
                 self.quotes.insert(dst, self.quotes.pop(src))
         except Exception:
             self.quotes = []
+        self._sync_groups()
         self.cfg["watchlist"] = [dict(w) for w in self.watchlist]
         save_config(self.cfg)
         self._cfg_mtime = self._config_mtime()
@@ -4151,6 +4841,338 @@ class FOMO:
                 w._invalidate()
             except Exception as e:
                 log("open chart panel failed: %r" % e)
+
+    def _open_note_board(self):
+        """打开打字板（独立进程的富文本便签：加粗/下划线/颜色/插图/检索/透明度/字号）。"""
+        ps1 = os.path.join(APP_DIR, "note_board.ps1")
+        if not os.path.isfile(ps1):
+            self._msgbox("缺少 note_board.ps1，无法打开打字板。请重新解压完整包。")
+            return
+        try:
+            self._note_proc = subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", ps1],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+        except Exception as e:
+            self._msgbox("打开打字板失败：%r" % e)
+
+    # ---------------- 自选股分组 ----------------
+    def _sync_groups(self):
+        """把当前列表写回所属分组（增删自选股、拖动排序后调用）。"""
+        try:
+            gs = self.cfg.get("groups")
+            name = self.cfg.get("group") or "默认"
+            if isinstance(gs, dict) and name in gs:
+                gs[name] = [dict(w) for w in self.watchlist]
+        except Exception as e:
+            log("sync groups failed: %r" % e)
+
+    def _fit_rows(self):
+        """按当前行数把窗口高度调成刚好放得下（分组切换后行数会变）。"""
+        if self.collapsed or self.panel_open:
+            return
+        need = (self.header_h + self._S(2) + self.status_h
+                + self.row_h * max(1, len(self.watchlist)) + self.foot_h)
+        if need != self.height:
+            self.height = need
+            if self.hwnd:
+                user32.SetWindowPos(self.hwnd, None, 0, 0, self.width, self.height,
+                                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
+
+    def _switch_group(self, name):
+        gs = self.cfg.get("groups") or {}
+        if name not in gs or name == (self.cfg.get("group") or ""):
+            return
+        self._sync_groups()
+        self.cfg["group"] = name
+        self.cfg["watchlist"] = [dict(w) for w in gs[name]]
+        self.watchlist = self.cfg["watchlist"]
+        self.quotes = []
+        self._rescale_for_rows()
+        save_config(self.cfg)
+        self._cfg_mtime = self._config_mtime()
+        self._layout()
+        self._fit_rows()
+        self._invalidate()
+        if self.client:
+            self._wake.set()
+        log("switch group: %s (%d 只)" % (name, len(self.watchlist)))
+
+    def _group_input(self, mode):
+        """新建/改名：复用后台输入框（不能在本线程等弹框）。"""
+        if self._input_busy:
+            log("group input skipped: another dialog is open")
+            return
+        cur = self.cfg.get("group") or "默认"
+        init = "" if mode == "gnew" else cur
+        note = "现有分组：" + "、".join(self.cfg.get("groups") or {})
+        self._input_busy = True
+        self._input_mode = mode
+        self._input_result = None
+        self._set_topmost(False)
+        threading.Thread(target=self._group_input_worker,
+                         args=("分组名称", init, note), daemon=True).start()
+
+    def _group_input_worker(self, title, init, note):
+        res = None
+        try:
+            res = ps_field_form(title, [("名称", init)], note)
+        except Exception as e:
+            log("group input failed: %r" % e)
+        self._input_result = res
+        if self.hwnd:
+            try:
+                user32.PostMessageW(self.hwnd, WM_APP_INPUT, 0, 0)
+            except Exception:
+                pass
+
+    def _apply_group_name(self, mode, vals):
+        if not vals:
+            return
+        name = str(vals[0]).strip()
+        if not name:
+            return
+        gs = self.cfg.setdefault("groups", {})
+        old = self.cfg.get("group") or "默认"
+        if mode == "gnew":
+            if name in gs:
+                self._msgbox("分组「%s」已存在。" % name)
+                return
+            self._sync_groups()
+            gs[name] = []
+            self.cfg["group"] = name
+            self.cfg["watchlist"] = []
+            self.watchlist = self.cfg["watchlist"]
+            self.quotes = []
+            self._rescale_for_rows()
+            save_config(self.cfg)
+            self._cfg_mtime = self._config_mtime()
+            self._layout()
+            self._fit_rows()
+            self._invalidate()
+            log("new group: %s" % name)
+        else:
+            if name == old:
+                return
+            if name in gs:
+                self._msgbox("分组「%s」已存在。" % name)
+                return
+            self._sync_groups()
+            gs[name] = gs.pop(old, [])
+            self.cfg["group"] = name
+            save_config(self.cfg)
+            self._cfg_mtime = self._config_mtime()
+            log("rename group: %s -> %s" % (old, name))
+
+    def _del_group(self):
+        gs = self.cfg.get("groups") or {}
+        cur = self.cfg.get("group") or "默认"
+        if len(gs) <= 1:
+            self._msgbox("只有一个分组，不能删除。")
+            return
+        self._sync_groups()
+        keep = "默认" if cur != "默认" else sorted(gs.keys())[0]
+        gs.setdefault(keep, [])
+        exist = {w.get("code") for w in gs[keep]}
+        moved = 0
+        for w in gs.get(cur) or []:
+            if w.get("code") not in exist:
+                gs[keep].append(dict(w))
+                exist.add(w.get("code"))
+                moved += 1
+        gs.pop(cur, None)
+        self.cfg["group"] = keep
+        self.cfg["watchlist"] = [dict(w) for w in gs[keep]]
+        self.watchlist = self.cfg["watchlist"]
+        self.quotes = []
+        self._rescale_for_rows()
+        save_config(self.cfg)
+        self._cfg_mtime = self._config_mtime()
+        self._layout()
+        self._fit_rows()
+        self._invalidate()
+        log("del group: %s, %d 只并入 %s" % (cur, moved, keep))
+        self._msgbox("已删除分组「%s」，%d 只股票并入「%s」。" % (cur, moved, keep))
+
+    def _rescale_for_rows(self):
+        """换组/删组后行数变了：把 cfg["height"] 按新行数重算，保持字号比例不变。
+
+        _layout 里 ui_scale = height / (26+2+18+24*行数)，不重算就会出现"股票越少字越大"。
+        """
+        try:
+            n = max(1, len(self.watchlist))
+            base = 26 + 2 + 18 + 24 * n
+            self.cfg["height"] = int(round(base * max(0.55, min(3.0, self.ui_scale))))
+        except Exception as e:
+            log("rescale failed: %r" % e)
+
+    def _open_muyu(self):
+        """功德木鱼：独立小窗（同进程自绘，逐像素透明）。"""
+        if not os.path.isfile(MUYU_DATA):
+            self._msgbox("缺少 muyu.dat，无法打开木鱼。请重新解压完整包。")
+            return
+        try:
+            m = getattr(self, "_muyu", None)
+            if m is None or getattr(m, "hwnd", None) is None:
+                self._muyu = MuyuWindow(self)     # 没开过 / 已经关掉了
+            else:
+                m.show()
+            if getattr(self._muyu, "merit", 0) >= 10000:   # 老存档补判一次
+                self._ach_unlock("muyu10k")
+        except Exception as e:
+            log("open muyu failed: %r" % e)
+            self._msgbox("打开木鱼失败：%r" % e)
+
+    def _hide_muyu(self):
+        m = getattr(self, "_muyu", None)
+        if m:
+            m.hide()
+
+    def _show_muyu(self):
+        m = getattr(self, "_muyu", None)
+        if m:
+            m.show()
+
+    def _close_muyu(self):
+        m = getattr(self, "_muyu", None)
+        if m:
+            try:
+                m.close()
+            except Exception:
+                pass
+            self._muyu = None
+
+    # ---------------- 《点石成金》连击 ----------------
+    def _count_refresh(self):
+        """连点刷新：间隔 ≤5 秒算连击，累计 99 次解锁《点石成金》。"""
+        try:
+            now = time.time()
+            a = self.ach
+            last = float(a.data.get("refresh_last") or 0)
+            streak = int(a.data.get("refresh_streak") or 0)
+            streak = (streak + 1) if (now - last) <= 5.0 else 1
+            a.data["refresh_last"] = now
+            a.data["refresh_streak"] = streak
+            a.save()
+            if streak >= 99 and not a.unlocked("golden"):
+                a.data["refresh_streak"] = 0
+                a.save()
+                self._ach_unlock("golden")
+                log("refresh streak hit 99")
+                # 解锁即切到黑金（顺手把主题换上，省得再去翻）
+                try:
+                    self.theme_name = "gold"
+                    self.colors = self._theme_colors(self.theme_name)
+                    self.cfg["theme"] = "gold"
+                    save_config(self.cfg)
+                    self._invalidate()
+                except Exception as _e:
+                    log("switch to gold failed: %r" % _e)
+                self._msgbox("解锁《点石成金》。\n黑金主题已可用：点右上角「色」切换。")
+        except Exception as e:
+            log("refresh count failed: %r" % e)
+
+    def _manual_refresh(self):
+        """手动刷新（刷按钮 / 刷新热键）：唤醒取数并计入连击。"""
+        try:
+            self._wake.set()
+        except Exception:
+            pass
+        self._count_refresh()
+
+    def _theme_unlocked(self, name):
+        """黑金主题要先解锁《点石成金》。"""
+        if name != "gold":
+            return True
+        try:
+            return bool(self.ach.unlocked("golden"))
+        except Exception:
+            return False
+
+    # ---------------- 健康关怀 ----------------
+    def _health_cfg(self):
+        h = self.cfg.get("health")
+        if not isinstance(h, dict):
+            h = {"every": 0, "last": 0, "idx": 0}
+            self.cfg["health"] = h
+        return h
+
+    def _health_dialog(self):
+        if self._input_busy:
+            return
+        h = self._health_cfg()
+        cur = "%g" % float(h.get("every") or 0)
+        self._input_busy = True
+        self._input_mode = "health"
+        self._input_result = None
+        self._set_topmost(False)
+        threading.Thread(target=self._group_input_worker,
+                         args=("健康关怀", cur, "间隔分钟数，0 = 关闭；建议 40~60"),
+                         daemon=True).start()
+
+    def _apply_health(self, vals):
+        if not vals:
+            return
+        try:
+            every = float(str(vals[0]).strip() or 0)
+        except ValueError:
+            self._msgbox("请输入数字，例如 45。")
+            return
+        every = max(0.0, min(600.0, every))
+        h = self._health_cfg()
+        if every > 0:
+            h["prev"] = every
+        h["every"] = every
+        h["last"] = time.time()
+        h["idx"] = 0
+        save_config(self.cfg)
+        self._cfg_mtime = self._config_mtime()
+        self._msgbox("健康提醒已%s。" % ("关闭" if every <= 0 else "开启：每 %g 分钟一条" % every))
+        log("health every=%g" % every)
+
+    def _health_tick(self):
+        """由 250ms tick 驱动：到点弹一张卡片。窗口藏起来时不打扰。"""
+        h = self._health_cfg()
+        try:
+            every = float(h.get("every") or 0)
+        except (TypeError, ValueError):
+            every = 0.0
+        if every <= 0:
+            return          # 主窗口隐藏时也照弹（用户要求：隐藏不影响健康提醒）
+        now = time.time()
+        if now - float(h.get("last") or 0) < every * 60.0:
+            return
+        idx = int(h.get("idx") or 0) % len(HEALTH_TIPS)
+        title, main, sub = HEALTH_TIPS[idx]
+        h["last"] = now
+        h["idx"] = (idx + 1) % len(HEALTH_TIPS)
+        try:
+            save_config(self.cfg)
+        except Exception:
+            pass
+        ps_health_tip(title, main, sub)
+        log("health tip: %s" % title)
+
+    def _health_toggle(self):
+        """一键开/关健康提醒（菜单里就能关，不用进设置）。"""
+        h = self._health_cfg()
+        try:
+            every = float(h.get("every") or 0)
+        except (TypeError, ValueError):
+            every = 0.0
+        if every > 0:
+            h["prev"] = every
+            h["every"] = 0
+            log("health off (was %g min)" % every)
+        else:
+            back = float(h.get("prev") or 45)
+            h["every"] = back if back > 0 else 45
+            h["last"] = time.time()
+            h["idx"] = 0
+            log("health on (%g min)" % h["every"])
+        save_config(self.cfg)
+        self._cfg_mtime = self._config_mtime()
+        self._invalidate()
 
     def _set_hotkeys(self):
         hk = dict(self.cfg.get("hotkeys") or {})
@@ -4384,7 +5406,23 @@ class FOMO:
         user32.AppendMenuW(hmenu, MF_STRING, ID_ACH, "成就（%d/%d）…" % (
             len(self.ach.data.get("unlocked", {})), len(ACH_LIST)))
         user32.AppendMenuW(hmenu, MF_STRING, ID_HOTKEYS, "快捷键设置…")
+        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+        _gs = self.cfg.get("groups") or {}
+        _cur = self.cfg.get("group") or ""
+        for _i, _gname in enumerate(_gs):
+            user32.AppendMenuW(hmenu, MF_STRING, ID_GROUP_BASE + _i,
+                               "分组：%s%s" % (_gname, " ✓" if _gname == _cur else ""))
+        user32.AppendMenuW(hmenu, MF_STRING, ID_GROUP_NEW, "新建分组…")
+        user32.AppendMenuW(hmenu, MF_STRING, ID_GROUP_RENAME, "当前分组改名…")
+        user32.AppendMenuW(hmenu, MF_STRING, ID_GROUP_DEL, "删除当前分组（并入默认组）")
+        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(hmenu, MF_STRING, ID_LICENSE, "开源协议 / 免责声明…")
+        user32.AppendMenuW(hmenu, MF_STRING, ID_NOTE, "打字板（记事）…")
+        _hv = self._health_cfg().get("every") or 0
+        user32.AppendMenuW(hmenu, MF_STRING, ID_HEALTH,
+                           "健康提醒：%s" % (("已开（%g 分钟）" % float(_hv)) if float(_hv) > 0 else "已关"))
+        user32.AppendMenuW(hmenu, MF_STRING, ID_HEALTH_SET, "  设置提醒间隔…")
+        user32.AppendMenuW(hmenu, MF_STRING, ID_MUYU, "功德木鱼（解压）…")
         user32.AppendMenuW(hmenu, MF_STRING, ID_CHART_STYLE_MAIN, "K 线图外观（字号/透明度/字体）…")
         user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(hmenu, MF_STRING, ID_EDIT, "添加 / 删除自选股…")
@@ -4412,6 +5450,8 @@ class FOMO:
                 pass
             for w in list(_charts):        # K 线窗口跟着一起藏
                 w.hide_by_auto()
+            self._hide_notes()
+            self._hide_muyu()
         else:
             if self.always_on_top:
                 user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
@@ -4420,6 +5460,8 @@ class FOMO:
             self.visible = True
             for w in list(_charts):
                 w.show_by_auto()
+            self._show_notes()
+            self._show_muyu()
             self._auto_next = self._auto_deadline()   # 刚显示出来，自动隐蔽重新计时
             self._wake.set()
 
@@ -4435,8 +5477,87 @@ class FOMO:
             self.visible = False
         for w in list(_charts):
             w.hide_by_auto()
+        self._hide_notes()
+        self._hide_muyu()
         self._auto_next = self._auto_deadline()
         log("auto hide: all windows hidden (every %d min)" % self.auto_hide_minutes)
+
+    # ---------------- 打字板联动（独立进程，按 PID 找窗口） ----------------
+    def _note_hwnds(self):
+        """返回打字板进程的顶层窗口句柄列表（标题里含「打字板」）。"""
+        p = self._note_proc
+        if not p:
+            return []
+        try:
+            if p.poll() is not None:
+                self._note_proc = None
+                return []
+        except Exception:
+            self._note_proc = None
+            return []
+        out = []
+        pid = p.pid
+
+        def _cb(hwnd, lparam):
+            try:
+                d = wintypes.DWORD(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(d))
+                if d.value == pid:
+                    buf = ctypes.create_unicode_buffer(160)
+                    user32.GetWindowTextW(hwnd, buf, 160)
+                    if "打字板" in buf.value:
+                        out.append(hwnd)
+            except Exception:
+                pass
+            return True
+
+        try:
+            cb = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(_cb)
+            user32.EnumWindows(cb, 0)
+        except Exception as e:
+            log("enum note windows failed: %r" % e)
+        return out
+
+    def _hide_notes(self):
+        _hs = self._note_hwnds()
+        log("note hide: %d windows" % len(_hs))
+        for h in _hs:
+            try:
+                user32.ShowWindow(h, SW_HIDE)
+            except Exception:
+                pass
+        self._note_hidden = True
+
+    def _show_notes(self):
+        _hs = self._note_hwnds()
+        log("note show: %d windows (proc=%r)" % (len(_hs), self._note_proc))
+        for h in _hs:
+            try:
+                user32.ShowWindow(h, SW_SHOWNOACTIVATE)
+                user32.SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0,
+                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+            except Exception:
+                pass
+        self._note_hidden = False
+
+    def _kill_note_board(self):
+        """主程序退出时把打字板一起关掉：先 WM_CLOSE 让它自动保存，超时再强杀。"""
+        p = self._note_proc
+        for h in self._note_hwnds():
+            try:
+                user32.PostMessageW(h, 0x0010, 0, 0)   # WM_CLOSE → FormClosing 里自动存盘
+            except Exception:
+                pass
+        if p is not None:
+            try:
+                p.wait(timeout=1.5)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        self._note_proc = None
+        self._note_hidden = False
 
     def _hotkey_label(self, key):
         """把配置里的组合键写法变成人话：ctrl+alt+h → Ctrl+Alt+H"""
@@ -4487,7 +5608,7 @@ class FOMO:
             self._msgbox("已关闭自动隐蔽。")
 
     def _cycle_theme(self):
-        order = list(THEME_ORDER)
+        order = [t for t in THEME_ORDER if self._theme_unlocked(t)]   # 未解锁的隐藏
         if isinstance(self.cfg.get("custom_theme"), dict):
             order.append("custom")
         try:
@@ -4697,7 +5818,7 @@ class FOMO:
             return                        # 已经有一个输入框在等了，别叠第二个
         cur = "、".join(w["code"] for w in self.watchlist) or "（空）"
         prompt = ("输入股票代码以添加（空格 / 逗号分隔）：\n"
-                  "例如：600519 000001 sz300750\n"
+                  "例如：sh000001 sz399001 sz399006\n"
                   "加 - 前缀表示删除，例如：-600519\n\n"
                   "当前自选股：\n" + cur)
         self._input_busy = True
@@ -4733,6 +5854,12 @@ class FOMO:
             return
         if mode == "alert":
             self._apply_alert_form(s)
+            return
+        if mode == "health":
+            self._apply_health(s)
+            return
+        if mode in ("gnew", "grename"):
+            self._apply_group_name(mode, s)
             return
         if not s:
             return
@@ -4778,6 +5905,7 @@ class FOMO:
             return 0, 0
         self.cfg["watchlist"] = wl
         self.watchlist = wl
+        self._sync_groups()
         self.quotes = []   # 清空旧行情，避免与新的行数/顺序短暂错位
         save_config(self.cfg)
         self._cfg_mtime = self._config_mtime()
@@ -4997,7 +6125,21 @@ class FOMO:
                 self._fill(memdc, 1, body_y, w - 2, body_h, t["panel"])
 
         # 菜单栏
-        self._fill(memdc, 0, 0, w, self.header_h, t["header"])
+        _gh = t.get("grad_header")
+        _gs = t.get("grad_stops")
+        if (_gh or _gs) and not self.transparent:
+            # 金属标题条：多段渐变（多层反射）+ 顶部纯白高光 + 底部暗边
+            if _gs:
+                self._grad_stops(memdc, 0, 0, w, self.header_h, _gs)
+            else:
+                self._grad_v(memdc, 0, 0, w, self.header_h, _gh[0], _gh[1])
+            if t.get("specular"):
+                self._fill(memdc, 0, 0, w, max(1, self._S(1)), t["specular"])
+            if t.get("bevel"):
+                self._fill(memdc, 0, self.header_h - max(1, self._S(1)), w,
+                           max(1, self._S(1)), t["bevel"])
+        else:
+            self._fill(memdc, 0, 0, w, self.header_h, t["header"])
         self._fill(memdc, 0, self.header_h - self._S(1), w, self._S(1), t["border"])
         self._text(memdc, self._S(10), 0, self._S(184), self.header_h,
                    APP_TITLE, self.f_title, t["header_text"], DT_LEFT | DT_VCENTER | DT_SINGLELINE)
@@ -5061,10 +6203,11 @@ class FOMO:
 
         # 外框：普通主题 1px；透明主题 4px（半透明的一圈淡线，兼作抓取区）
         b = self._D(4) if self.transparent else self._D(1)
-        self._fill(memdc, 0, 0, w, b, t["border"])
-        self._fill(memdc, 0, h - b, w, b, t["border"])
-        self._fill(memdc, 0, 0, b, h, t["border"])
-        self._fill(memdc, w - b, 0, b, h, t["border"])
+        _bc = t.get("frame") or t["border"]        # 金框可以单独更亮
+        self._fill(memdc, 0, 0, w, b, _bc)
+        self._fill(memdc, 0, h - b, w, b, _bc)
+        self._fill(memdc, 0, 0, b, h, _bc)
+        self._fill(memdc, w - b, 0, b, h, _bc)
 
         # 透明主题：右下角补一块实心三角当缩放手柄
         if self.transparent:

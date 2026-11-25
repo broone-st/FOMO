@@ -1,0 +1,126 @@
+# FOMO — Notice, Disclaimer and License
+
+Copyright (c) 2026 Broone-st
+
+Required Notice: Copyright (c) 2026 Broone-st
+
+> **This license is based on the PolyForm Noncommercial License 1.0.0, with the modifications listed in Section 4.**
+> **It is NOT the unmodified PolyForm Noncommercial License 1.0.0**, and must not be presented to others as such.
+> 本协议基于 PolyForm Noncommercial License 1.0.0 修改而来，修改内容见第四节；**它不是未经修改的原版协议**，
+> 向他人说明时不得称作「PolyForm Noncommercial 1.0.0」。
+
+---
+
+## 1. Notice Before Use / 使用前须知
+
+**Any download, use, copying, or distribution of this software constitutes your confirmation that you have fully read, understood, and completely accepted all terms of this license, and that you have fully read, understood, and accepted the content of this notice.**
+
+**您对本软件的任何下载、使用、复制或分发行为，均视为您已充分阅读、理解并完全同意本协议的全部条款，视为您已充分阅读、理解并完全同意本声明内容。**
+
+---
+
+## 2. Disclaimer / 免责声明
+
+1. **Not investment advice.** This software is a market-data viewer, not an investment adviser. All data is for reference only and does not constitute any investment advice, offer, or promise of return. Stock markets carry risk; all profits and losses are borne solely by the user.
+   **非投资建议。** 本软件是行情显示工具，不是投资顾问。所有数据仅供参考，不构成任何投资建议、买卖要约或收益承诺。股市有风险，投资需谨慎，盈亏由使用者自行承担。
+
+2. **Data.** Data is supplied by data sources configured by the user. The author does not warrant its accuracy, completeness, timeliness, or legality. The user is responsible for confirming the terms and authorisation of any data source. Do not publish, redistribute, display publicly, or commercially exploit market data obtained through this software.
+   **数据。** 数据由使用者自行配置的数据源提供，作者不保证其真实性、完整性、及时性或合法性，数据源的使用条件与授权由使用者自行确认。请勿将行情数据对外发布、转发、公开展示或用于经营牟利。
+
+3. **No trading functions.** This software contains no trading, order-placing, or fund-transfer functionality.
+   **不含交易功能。** 本软件不包含任何交易、下单、资金划转功能。
+
+4. **As-is, no liability.** As far as the law allows, the software comes as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the software, under any kind of legal claim. This includes, without limitation, financial loss, data loss, and loss of profit.
+   **按现状提供。** 在法律允许的最大范围内，本软件按「原样」提供，不附带任何明示或暗示的担保；因本协议、本软件的使用或其性质引起的任何损害（含但不限于资金损失、数据丢失、利润损失），许可人不承担责任。
+
+5. **Noncommercial only — and no religious use.** This software may not be used for any commercial purpose, nor for any religious activity, worship, practice, or observance. Any such use requires a separate written licence from the author.
+   **仅限非商业用途，且不得用于宗教活动。** 本软件不得用于任何商业用途，也不得用于任何宗教活动、礼拜、宗教实践或宗教仪式；上述使用均需另行取得作者的书面许可。
+
+6. **Attribution.** The name "FOMO" and the author's attribution must not be removed, and must not be used in misleading promotion.
+   **署名。** 「FOMO」名称与作者署名不得移除，也不得用于误导性宣传。
+
+---
+
+## 3. License Terms (based on PolyForm Noncommercial License 1.0.0)
+
+### Acceptance
+
+In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
+
+### Copyright License
+
+The licensor grants you a copyright license for the software to do everything you might do with the software that would otherwise infringe the licensor's copyright in it for any permitted purpose. However, you may only distribute the software according to the Distribution License and make changes or new works based on the software according to the Changes and New Works License.
+
+### Distribution License
+
+The licensor grants you an additional copyright license to distribute copies of the software. Your license to distribute covers distributing the software with changes and new works permitted by the Changes and New Works License.
+
+### Notices
+
+You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms or the URL for them above, as well as copies of any plain-text lines beginning with `Required Notice:` that the licensor provided with the software.
+
+### Changes and New Works License
+
+The licensor grants you an additional copyright license to make changes and new works based on the software for any permitted purpose.
+
+### Patent License
+
+The licensor grants you a patent license for the software that covers patent claims the licensor can license, or becomes able to license, that you would infringe by using the software.
+
+### Noncommercial Purposes
+
+Any noncommercial purpose is a permitted purpose, **except the excluded uses listed under "Excluded Uses" below**.
+
+### Personal Uses
+
+Personal use for research, experiment, and testing for the benefit of public knowledge, personal study, private entertainment, hobby projects, or amateur pursuits, without any anticipated commercial application, is use for a permitted purpose.
+
+### Noncommercial Organizations
+
+Use by any charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization, or government institution is use for a permitted purpose regardless of the source of funding or obligations resulting from the funding.
+
+### Excluded Uses
+
+Notwithstanding anything else in these terms, **no license is granted, and none of the licenses above may be exercised, for any religious purpose**, including without limitation religious worship, religious practice, religious observance, religious ceremony, religious education whose primary purpose is religious, or the promotion of any religion or religious organisation.
+
+### Fair Use
+
+You may have "fair use" rights for the software under the law. These terms do not limit them.
+
+### No Liability
+
+**As far as the law allows, the software comes as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the software, under any kind of legal claim.**
+
+### Definitions
+
+The **licensor** is the individual or entity offering these terms, and the **software** is the software the licensor makes available under these terms.
+
+**You** refers to the individual or entity agreeing to these terms.
+
+**Your company** is any legal entity, sole proprietorship, or other kind of organization that you work for, plus all organizations that have control over, are under the control of, or are under common control with that organization. **Control** means ownership of substantially all the assets of an entity, or the power to direct its management and policies by vote, contract, or otherwise. Control can be direct or indirect.
+
+**Your licenses** are all the licenses granted to you for the software under these terms.
+
+**Use** means anything you do with the software requiring one of your licenses.
+
+**Trademark** means trademarks, service marks, and similar rights.
+
+---
+
+## 4. Modifications to PolyForm Noncommercial License 1.0.0 / 对原版协议的修改
+
+This license differs from PolyForm Noncommercial License 1.0.0 <https://polyformproject.org/licenses/noncommercial/1.0.0> in the following respects only:
+
+1. **Personal Uses** — the words "or religious observance" have been removed from the list of permitted personal uses.
+2. **Excluded Uses** — a new section has been added, expressly withholding any license for religious purposes.
+3. **Noncommercial Purposes** — a cross-reference to "Excluded Uses" has been added.
+
+本协议与 PolyForm Noncommercial License 1.0.0 的差异**仅限以下三处**：
+
+1. **个人使用（Personal Uses）**：许可列表中删除了「宗教活动（religious observance）」；
+2. **排除用途（Excluded Uses）**：新增一节，明确不授予任何宗教用途的许可；
+3. **非商业目的（Noncommercial Purposes）**：增加了对「排除用途」的交叉引用。
+
+---
+
+A Chinese translation is provided in `LICENSE.zh-CN.md` for convenience. If there is any conflict or ambiguity, the English text of this file prevails.
