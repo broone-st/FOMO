@@ -5416,7 +5416,7 @@ class FOMO:
         user32.AppendMenuW(hmenu, MF_STRING, ID_GROUP_RENAME, "当前分组改名…")
         user32.AppendMenuW(hmenu, MF_STRING, ID_GROUP_DEL, "删除当前分组（并入默认组）")
         user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(hmenu, MF_STRING, ID_LICENSE, "开源协议 / 免责声明…")
+        user32.AppendMenuW(hmenu, MF_STRING, ID_LICENSE, "开源协议 / 免责声明（V2.0.0）…")
         user32.AppendMenuW(hmenu, MF_STRING, ID_NOTE, "打字板（记事）…")
         _hv = self._health_cfg().get("every") or 0
         user32.AppendMenuW(hmenu, MF_STRING, ID_HEALTH,
